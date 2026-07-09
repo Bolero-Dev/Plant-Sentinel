@@ -1,9 +1,9 @@
 //
 //  GardenView.swift
-//  FrostSentinel
+//  PlantSentinel (formerly FrostSentinel)
 //
-//  The whole app on one screen: tonight's low, and a verdict per plant.
-//  Deliberately quiet — no radar, no charts, no alerts. Just the answer.
+//  The whole app on one screen: tonight's low, tomorrow's high, and a verdict
+//  per plant. Deliberately quiet — no radar, no charts. Just the answer.
 //
 
 import SwiftUI
@@ -26,7 +26,7 @@ struct GardenView: View {
                 tonightSection
                 verdictSection
             }
-            .navigationTitle("Frost Sentinel")
+            .navigationTitle("Plant Sentinel")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Location") { isShowingLocationSheet = true }
@@ -42,8 +42,12 @@ struct GardenView: View {
                 }
             }
             .sheet(isPresented: $isShowingAddSheet) {
-                AddPlantSheet { name, tolerance in
-                    _ = try? store.addPlant(name: name, toleranceCelsius: tolerance)
+                AddPlantSheet { name, coldTolerance, heatTolerance in
+                    _ = try? store.addPlant(
+                        name: name,
+                        toleranceCelsius: coldTolerance,
+                        heatToleranceCelsius: heatTolerance
+                    )
                     reloadPlants()
                     viewModel.reevaluate()
                 }
@@ -76,6 +80,15 @@ struct GardenView: View {
                         .font(.title3.weight(.semibold))
                         .accessibilityIdentifier("garden.tonightLow")
                 }
+                if let max = viewModel.tomorrowMaxC {
+                    HStack {
+                        Text("Tomorrow's high")
+                        Spacer()
+                        Text(String(format: "%.1f °C", max))
+                            .font(.title3.weight(.semibold))
+                            .accessibilityIdentifier("garden.tomorrowHigh")
+                    }
+                }
             } else if let error = viewModel.errorMessage {
                 Text(error).foregroundStyle(.secondary)
             } else {
@@ -97,7 +110,7 @@ struct GardenView: View {
     private var verdictSection: some View {
         Section("Your plants") {
             if plants.isEmpty {
-                Text("Add a plant to get a nightly verdict.")
+                Text("No plants right now. Tap the + button to add one.")
                     .foregroundStyle(.secondary)
             } else if viewModel.verdicts.isEmpty {
                 ForEach(plants) { plant in
@@ -120,7 +133,7 @@ struct GardenView: View {
 
     private func deletePlants(at offsets: IndexSet) {
         let sortedPlants = (try? store.plants()) ?? []
-        // Verdicts are sorted by risk; map back to the plant by id.
+        // Verdicts are sorted by severity; map back to the plant by id.
         for index in offsets {
             let verdict = viewModel.verdicts[index]
             if let plant = sortedPlants.first(where: { $0.id == verdict.id }) {
@@ -140,7 +153,7 @@ private struct VerdictRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Circle()
-                .fill(riskColor)
+                .fill(severityColor)
                 .frame(width: 12, height: 12)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -152,7 +165,8 @@ private struct VerdictRow: View {
 
             Spacer()
 
-            Text(String(format: "%+.1f°", verdict.marginC))
+            // The margin of whichever side is tighter — the number that matters.
+            Text(String(format: "%+.1f°", dominantMargin))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -160,13 +174,18 @@ private struct VerdictRow: View {
         .accessibilityIdentifier("garden.verdict.\(verdict.plantName)")
     }
 
-    private var riskColor: Color {
-        switch verdict.risk {
-        case .none: return .green
-        case .watch: return .yellow
-        case .frost: return .orange
-        case .hardFreeze: return .red
-        @unknown default: return .gray
+    private var dominantMargin: Double {
+        verdict.heatRisk.rawValue > verdict.frostRisk.rawValue
+            ? verdict.heatMarginC
+            : verdict.frostMarginC
+    }
+
+    private var severityColor: Color {
+        switch verdict.severity {
+        case 0: return .green
+        case 1: return .yellow
+        case 2: return .orange
+        default: return .red
         }
     }
 }
@@ -176,30 +195,57 @@ private struct VerdictRow: View {
 private struct AddPlantSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
-    @State private var tolerance: Double = 0
+    @State private var coldTolerance: Double = 0
+    @State private var heatTolerance: Double = PersistenceController.defaultHeatToleranceCelsius
 
-    let onAdd: (String, Double) -> Void
+    let onAdd: (String, Double, Double) -> Void
 
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Plant name", text: $name)
-                    .accessibilityIdentifier("addPlant.nameField")
+                Section {
+                    TextField("Plant name", text: $name)
+                        .accessibilityIdentifier("addPlant.nameField")
 
-                VStack(alignment: .leading) {
-                    Text("Cold tolerance: \(String(format: "%.0f", tolerance)) °C")
-                    Slider(value: $tolerance, in: -20...10, step: 1)
-                        .accessibilityIdentifier("addPlant.toleranceSlider")
-                    Text("The lowest temperature it tolerates uncovered. Tender plants: around 0°. Hardy perennials: −15° or lower.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    Menu("Start from a common plant") {
+                        ForEach(PlantCatalog.presets) { preset in
+                            Button(preset.name) {
+                                name = preset.name
+                                coldTolerance = preset.coldToleranceC
+                                heatTolerance = preset.heatToleranceC
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("addPlant.presetMenu")
+                } footer: {
+                    Text("Presets are starting points, not botany — adjust either number for your garden's reality.")
+                }
+
+                Section {
+                    VStack(alignment: .leading) {
+                        Text("Cold tolerance: \(String(format: "%.0f", coldTolerance)) °C")
+                        Slider(value: $coldTolerance, in: -30...10, step: 1)
+                            .accessibilityIdentifier("addPlant.toleranceSlider")
+                        Text("The lowest temperature it tolerates uncovered. Tender plants: around 0°. Hardy perennials: −15° or lower.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading) {
+                        Text("Heat tolerance: \(String(format: "%.0f", heatTolerance)) °C")
+                        Slider(value: $heatTolerance, in: 20...45, step: 1)
+                            .accessibilityIdentifier("addPlant.heatSlider")
+                        Text("The daytime high it handles without extra water or shade. Cool-season greens: mid-20s. Heat lovers: high 30s.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .navigationTitle("Add Plant")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
-                        onAdd(name.trimmingCharacters(in: .whitespaces), tolerance)
+                        onAdd(name.trimmingCharacters(in: .whitespaces), coldTolerance, heatTolerance)
                         dismiss()
                     }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -210,7 +256,7 @@ private struct AddPlantSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.large])
     }
 }
 
@@ -236,7 +282,7 @@ private struct LocationSheet: View {
                             .multilineTextAlignment(.trailing)
                     }
                 } footer: {
-                    Text("Coordinates only — Frost Sentinel never asks for location permission, so your position is never shared with anyone. Find yours on any map app.")
+                    Text("Coordinates only — Plant Sentinel never asks for location permission, so your position is never shared with anyone. Find yours on any map app.")
                 }
             }
             .navigationTitle("Location")

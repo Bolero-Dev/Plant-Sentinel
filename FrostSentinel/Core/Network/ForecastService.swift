@@ -1,27 +1,33 @@
 //
 //  ForecastService.swift
-//  FrostSentinel
+//  PlantSentinel (formerly FrostSentinel)
 //
-//  Fetches nightly minimum temperatures from the Open-Meteo REST API.
+//  Fetches daily minimum and maximum temperatures from the Open-Meteo REST API.
 //  No API key, no account — consistent with the app's no-tracking posture.
+//
+//  The minimum answers the frost question ("cover it tonight?"); the maximum
+//  answers the heat question ("water it tonight, before tomorrow?"). Same
+//  endpoint, same request — one extra field made the app multi-season.
 //
 
 import Foundation
 
-/// One night's forecast minimum.
-struct NightForecast: Equatable {
+/// One day's forecast: the overnight minimum and the daytime maximum.
+struct DayForecast: Equatable {
     let date: Date
     let minTempC: Double
+    let maxTempC: Double
 }
 
 /// Abstraction over the forecast source so the view model can be tested
-/// without touching the network.
+/// without touching the network. (This protocol is also the seam a future
+/// Android port re-implements — keep platform types out of it.)
 protocol ForecastFetching {
-    func nightlyMinimums(
+    func forecast(
         latitude: Double,
         longitude: Double,
         days: Int
-    ) async throws -> [NightForecast]
+    ) async throws -> [DayForecast]
 }
 
 enum ForecastError: Error, Equatable {
@@ -34,15 +40,15 @@ enum ForecastError: Error, Equatable {
 ///
 /// Endpoint shape:
 /// https://api.open-meteo.com/v1/forecast?latitude=..&longitude=..
-///   &daily=temperature_2m_min&timezone=auto&forecast_days=N
+///   &daily=temperature_2m_min,temperature_2m_max&timezone=auto&forecast_days=N
 struct OpenMeteoForecastService: ForecastFetching {
     var session: URLSession = .shared
 
-    func nightlyMinimums(
+    func forecast(
         latitude: Double,
         longitude: Double,
         days: Int
-    ) async throws -> [NightForecast] {
+    ) async throws -> [DayForecast] {
         guard let url = makeURL(latitude: latitude, longitude: longitude, days: days) else {
             throw ForecastError.badURL
         }
@@ -61,7 +67,7 @@ struct OpenMeteoForecastService: ForecastFetching {
         components?.queryItems = [
             URLQueryItem(name: "latitude", value: String(latitude)),
             URLQueryItem(name: "longitude", value: String(longitude)),
-            URLQueryItem(name: "daily", value: "temperature_2m_min"),
+            URLQueryItem(name: "daily", value: "temperature_2m_min,temperature_2m_max"),
             URLQueryItem(name: "timezone", value: "auto"),
             URLQueryItem(name: "forecast_days", value: String(days)),
         ]
@@ -72,7 +78,7 @@ struct OpenMeteoForecastService: ForecastFetching {
 
     /// Open-Meteo returns parallel arrays; this zips them into typed values.
     /// Static and pure so it is directly unit-testable against fixtures.
-    static func parse(_ data: Data) throws -> [NightForecast] {
+    static func parse(_ data: Data) throws -> [DayForecast] {
         let decoded: OpenMeteoResponse
         do {
             decoded = try JSONDecoder().decode(OpenMeteoResponse.self, from: data)
@@ -80,7 +86,8 @@ struct OpenMeteoForecastService: ForecastFetching {
             throw ForecastError.malformedPayload
         }
 
-        guard decoded.daily.time.count == decoded.daily.temperature2mMin.count else {
+        guard decoded.daily.time.count == decoded.daily.temperature2mMin.count,
+              decoded.daily.time.count == decoded.daily.temperature2mMax.count else {
             throw ForecastError.malformedPayload
         }
 
@@ -89,11 +96,14 @@ struct OpenMeteoForecastService: ForecastFetching {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "UTC")
 
-        return try zip(decoded.daily.time, decoded.daily.temperature2mMin).map { day, minTemp in
+        return try zip(
+            decoded.daily.time,
+            zip(decoded.daily.temperature2mMin, decoded.daily.temperature2mMax)
+        ).map { day, temps in
             guard let date = formatter.date(from: day) else {
                 throw ForecastError.malformedPayload
             }
-            return NightForecast(date: date, minTempC: minTemp)
+            return DayForecast(date: date, minTempC: temps.0, maxTempC: temps.1)
         }
     }
 }
@@ -106,10 +116,12 @@ struct OpenMeteoResponse: Decodable {
     struct Daily: Decodable {
         let time: [String]
         let temperature2mMin: [Double]
+        let temperature2mMax: [Double]
 
         enum CodingKeys: String, CodingKey {
             case time
             case temperature2mMin = "temperature_2m_min"
+            case temperature2mMax = "temperature_2m_max"
         }
     }
 }
